@@ -1,0 +1,12 @@
+[package]
+name = "TokenExchanger"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1.77" 
+pingora-core = "0.1.0"
+pingora-http = "0.1.0"
+pingora-proxy = "0.1.0"
