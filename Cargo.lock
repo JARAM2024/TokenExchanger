@@ -7,8 +7,10 @@ name = "TokenExchanger"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "lazy_static",
  "pingora-core",
  "pingora-http",
+ "pingora-limits",
  "pingora-proxy",
 ]
 
@@ -1153,6 +1155,15 @@ dependencies = [
  "bytes",
  "http 1.1.0",
  "pingora-error",
+]
+
+[[package]]
+name = "pingora-limits"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43e5e9ff9d54e951dfb0296946e63369b0778cb8534f0a7d1e9079001f1fe66d"
+dependencies = [
+ "ahash",
 ]
 
 [[package]]

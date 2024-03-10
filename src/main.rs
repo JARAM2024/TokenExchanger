@@ -1,21 +1,50 @@
+use std::collections::HashMap;
 use std::env;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
+
+use lazy_static::lazy_static;
 
 use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_core::Result;
 use pingora_http::ResponseHeader;
+use pingora_limits::rate::Rate;
 use pingora_proxy::{ProxyHttp, Session};
 
-fn check_valid_token(req: &pingora_http::RequestHeader, password: &String) -> bool {
-    req.headers.get("Authorization").map(|v| v.as_bytes()) == Some(password.as_bytes())
+pub struct MyGateWayLimiter {
+    max_req_ps: isize,
 }
 
 pub struct MyGateWay {
     endpoint: String,
     password: String,
     api_key: String,
+    limiter: MyGateWayLimiter,
+}
+
+lazy_static! {
+    static ref RATE_LIMITER_MAP: Arc<Mutex<HashMap<String, Rate>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+}
+
+impl MyGateWay {
+    pub fn get_request_token(&self, session: &Session) -> Option<String> {
+        match session
+            .req_header()
+            .headers
+            .get("Authorization")
+            .map(|v| v.to_str())
+        {
+            None => None,
+            Some(v) => match v {
+                Ok(v) => Some(v.to_string()),
+                Err(_) => None,
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -24,9 +53,42 @@ impl ProxyHttp for MyGateWay {
     fn new_ctx(&self) -> Self::CTX {}
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
-        if !check_valid_token(session.req_header(), &self.password) {
-            let _ = session.respond_error(403).await;
+        let token = match self.get_request_token(session) {
+            Some(v) => v,
+            None => {
+                session.respond_error(403).await;
+                return Ok(true);
+            }
+        };
 
+        if token != self.password {
+            session.respond_error(403).await;
+            return Ok(true);
+        }
+
+        let curr_window_requests = {
+            let mut rate_limiter_map = RATE_LIMITER_MAP.lock().unwrap();
+            let rate_limiter = match rate_limiter_map.get(&token) {
+                Some(limiter) => limiter,
+                None => {
+                    let limiter = Rate::new(Duration::from_secs(1));
+                    rate_limiter_map.insert(token.clone(), limiter);
+                    rate_limiter_map.get(&token).unwrap()
+                }
+            };
+
+            rate_limiter.observe(&token, 1)
+        };
+
+        if curr_window_requests > self.limiter.max_req_ps {
+            let mut header = ResponseHeader::build(429, None).unwrap();
+            header
+                .insert_header("X-Rate-Limit-Limit", self.limiter.max_req_ps.to_string())
+                .unwrap();
+            header.insert_header("X-Rate-Limit-Remaining", "0").unwrap();
+            header.insert_header("X-Rate-Limit-Reset", "1").unwrap();
+            session.set_keepalive(None);
+            session.write_response_header(Box::new(header)).await?;
             return Ok(true);
         }
 
@@ -98,6 +160,7 @@ fn main() {
         endpoint: "api.openai.com".to_string(),
         password: password.ok().unwrap(),
         api_key: api_key.ok().unwrap(),
+        limiter: MyGateWayLimiter { max_req_ps: 1 },
     };
 
     let mut my_proxy = pingora_proxy::http_proxy_service(&my_server.configuration, my_gateway);
