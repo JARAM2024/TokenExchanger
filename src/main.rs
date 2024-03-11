@@ -20,7 +20,7 @@ pub struct MyGateWayLimiter {
 
 pub struct MyGateWay {
     endpoint: String,
-    password: String,
+    validator_endpoint: String,
     api_key: String,
     limiter: MyGateWayLimiter,
 }
@@ -57,12 +57,25 @@ impl ProxyHttp for MyGateWay {
             Some(v) => v,
             None => {
                 session.respond_error(403).await;
+                println!("No Token");
                 return Ok(true);
             }
         };
 
-        if token != self.password {
+        let validate_data = reqwest::Client::new()
+            .post(self.validator_endpoint.to_owned())
+            .body(token.to_owned())
+            .send()
+            .await;
+        if validate_data.is_err() {
             session.respond_error(403).await;
+            println!("Cannot connect validator server");
+            return Ok(true);
+        }
+
+        if validate_data.ok().unwrap().status() != 200 {
+            session.respond_error(403).await;
+            println!("Not Valid Token");
             return Ok(true);
         }
 
@@ -144,9 +157,9 @@ fn main() {
     let mut my_server = Server::new(None).unwrap();
     my_server.bootstrap();
 
-    let password = env::var("TE_PASSWORD");
-    if password.is_err() {
-        println!("Please append TE_PASSWORD env variable.");
+    let validator_endpoint = env::var("VALIDATOR");
+    if validator_endpoint.is_err() {
+        println!("Please append VALIDATOR[<ip>:<port>] env variable.");
         return;
     }
 
@@ -156,15 +169,21 @@ fn main() {
         return;
     }
 
+    let server_endpoint = env::var("ENDPOINT");
+    if server_endpoint.is_err() {
+        println!("Please append ENDPOINT env variable.");
+        return;
+    }
+
     let my_gateway = MyGateWay {
         endpoint: "api.openai.com".to_string(),
-        password: password.ok().unwrap(),
+        validator_endpoint: validator_endpoint.ok().unwrap(),
         api_key: api_key.ok().unwrap(),
         limiter: MyGateWayLimiter { max_req_ps: 1 },
     };
 
     let mut my_proxy = pingora_proxy::http_proxy_service(&my_server.configuration, my_gateway);
-    my_proxy.add_tcp("127.0.0.1:6191");
+    my_proxy.add_tcp(&server_endpoint.ok().unwrap());
     my_server.add_service(my_proxy);
     my_server.run_forever();
 }
