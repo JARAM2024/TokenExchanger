@@ -1,0 +1,16 @@
+[
+  {
+    "name": "jaram-server",
+    "address": "server.jaram.net",
+    "port": 443,
+    "is_ssl": true,
+    "headers": [["X-Jaram-Server", "True"]]
+  },
+  {
+    "name": "openai-api",
+    "address": "api.openai.com",
+    "port": 443,
+    "is_ssl": true,
+    "headers": [["Authorization", "Bearer <Fill OpenAI TOKEN>"]]
+  }
+]

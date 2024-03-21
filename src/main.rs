@@ -14,8 +14,12 @@ use pingora_http::ResponseHeader;
 use pingora_limits::rate::Rate;
 use pingora_proxy::{ProxyHttp, Session};
 
+use dotenv::dotenv;
+
+use endpoint::MyEndpoint;
 use validator::MyValidator;
 
+mod endpoint;
 mod validator;
 
 pub struct MyGateWayLimiter {
@@ -23,9 +27,10 @@ pub struct MyGateWayLimiter {
 }
 
 pub struct MyGateWay {
-    endpoint: String,
+    endpoint: MyEndpoint,
     validator: MyValidator,
     api_key: String,
+    proxy_password: String,
     limiter: MyGateWayLimiter,
 }
 
@@ -36,25 +41,44 @@ lazy_static! {
 
 impl MyGateWay {
     pub fn get_request_token(&self, session: &Session) -> Option<String> {
-        match session
-            .req_header()
-            .headers
-            .get("Authorization")
-            .map(|v| v.to_str())
-        {
-            None => None,
+        let headers = &session.req_header().headers;
+
+        match headers.get("Authorization").map(|v| v.to_str()) {
             Some(v) => match v {
                 Ok(v) => Some(v.to_string()),
                 Err(_) => None,
             },
+            None => None,
+        }
+    }
+
+    pub fn is_control_message(&self, session: &Session) -> bool {
+        let headers = &session.req_header().headers;
+
+        match headers.get("X-Proxy-Authorization").map(|v| v.to_str()) {
+            Some(v) => match v {
+                Ok(v) => v == self.proxy_password,
+                Err(_) => false,
+            },
+            None => false,
         }
     }
 }
 
+pub struct MyCTX {
+    host: String,
+    is_openai: bool,
+}
+
 #[async_trait]
 impl ProxyHttp for MyGateWay {
-    type CTX = ();
-    fn new_ctx(&self) -> Self::CTX {}
+    type CTX = MyCTX;
+    fn new_ctx(&self) -> Self::CTX {
+        return MyCTX {
+            host: "server.jaram.net".to_string(),
+            is_openai: false,
+        };
+    }
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
         let token = match self.get_request_token(session) {
@@ -103,27 +127,45 @@ impl ProxyHttp for MyGateWay {
 
     async fn upstream_peer(
         &self,
-        _session: &mut Session,
-        _ctx: &mut Self::CTX,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let addr = (self.endpoint.clone(), 443);
+        let headers = &session.req_header().headers;
+        let not_found = Err(pingora_core::Error::new(pingora_core::ErrorType::Custom(
+            "Cannot found such container",
+        )));
 
-        let peer = Box::new(HttpPeer::new(addr, true, self.endpoint.clone()));
-        Ok(peer)
+        let endpoint_key = match headers.get("X-Jaram-Container").map(|v| v.to_str()) {
+            Some(v) => match v {
+                Ok(v) => v,
+                Err(_) => return not_found,
+            },
+            None => return not_found,
+        };
+
+        let peer = self.endpoint.get_peer(endpoint_key, ctx);
+        match peer {
+            Some(peer) => Ok(Box::new(peer)),
+            None => not_found,
+        }
     }
 
     async fn upstream_request_filter(
         &self,
         _session: &mut Session,
         upstream_request: &mut pingora_http::RequestHeader,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> Result<()> {
         upstream_request
-            .insert_header("Host", self.endpoint.clone())
+            .insert_header("Host", ctx.host.to_owned())
             .unwrap();
-        upstream_request
-            .insert_header("Authorization", ["Bearer", &self.api_key].join(" "))
-            .unwrap();
+
+        if ctx.is_openai {
+            upstream_request
+                .insert_header("Authorization", ["Bearer", &self.api_key].join(" "))
+                .unwrap();
+        }
+
         Ok(())
     }
 
@@ -141,12 +183,19 @@ impl ProxyHttp for MyGateWay {
             .unwrap();
 
         upstream_response.remove_header("alt-svc");
+        upstream_response.remove_header("X-Proxy-Authorization");
+        upstream_response.remove_header("X-Jaram-Container");
 
         Ok(())
     }
 }
 
 fn main() {
+    if dotenv().is_err() {
+        println!("Please use .env file for configurations.");
+        return;
+    }
+
     let mut my_server = Server::new(None).unwrap();
     my_server.bootstrap();
 
@@ -164,7 +213,13 @@ fn main() {
 
     let server_endpoint = env::var("PROXY_ENDPOINT");
     if server_endpoint.is_err() {
-        println!("Please append ENDPOINT env variable.");
+        println!("Please append PROXY_ENDPOINT env variable.");
+        return;
+    }
+
+    let server_password = env::var("PROXY_PASSWORD");
+    if server_password.is_err() {
+        println!("Please append PROXY_PASSWORD env variable.");
         return;
     }
 
@@ -172,10 +227,14 @@ fn main() {
         endpoint: validator_endpoint.ok().unwrap(),
     };
 
+    let endpoint = MyEndpoint {};
+    endpoint.load_configuration(".entries.json");
+
     let my_gateway = MyGateWay {
-        endpoint: "api.openai.com".to_string(),
-        validator: validator,
+        endpoint,
+        validator,
         api_key: api_key.ok().unwrap(),
+        proxy_password: server_password.ok().unwrap(),
         limiter: MyGateWayLimiter { max_req_ps: 1 },
     };
 
