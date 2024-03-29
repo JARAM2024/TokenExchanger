@@ -57,7 +57,6 @@ impl MyEndpoint {
         let endpoint = match unlocked_map.get(key) {
             Some(endpoint) => {
                 ctx.host = endpoint.address.to_owned();
-                ctx.is_openai = key == "openai-gpt";
                 endpoint.to_owned()
             }
             None => return None,

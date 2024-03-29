@@ -11,6 +11,6 @@
     "address": "api.openai.com",
     "port": 443,
     "is_ssl": true,
-    "headers": [["Authorization", "Bearer <Fill OpenAI TOKEN>"]]
+    "headers": [["X-Openai-API", "True"]]
   }
 ]

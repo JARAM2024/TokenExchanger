@@ -1,61 +1,39 @@
-use std::collections::HashMap;
 use std::env;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
-
-use lazy_static::lazy_static;
 
 use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_core::Result;
 use pingora_http::ResponseHeader;
-use pingora_limits::rate::Rate;
 use pingora_proxy::{ProxyHttp, Session};
 
 use dotenv::dotenv;
 
+use http::Uri;
+
 use endpoint::MyEndpoint;
+use gpt::MyGPTProxy;
+use limiter::MyGateWayLimiter;
 use validator::MyValidator;
 
 mod endpoint;
+mod gpt;
+mod limiter;
 mod validator;
-
-pub struct MyGateWayLimiter {
-    max_req_ps: isize,
-}
 
 pub struct MyGateWay {
     endpoint: MyEndpoint,
-    validator: MyValidator,
-    api_key: String,
+    gpt: MyGPTProxy,
     proxy_password: String,
     limiter: MyGateWayLimiter,
 }
 
-lazy_static! {
-    static ref RATE_LIMITER_MAP: Arc<Mutex<HashMap<String, Rate>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-}
-
 impl MyGateWay {
-    pub fn get_request_token(&self, session: &Session) -> Option<String> {
-        let headers = &session.req_header().headers;
-
-        match headers.get("Authorization").map(|v| v.to_str()) {
-            Some(v) => match v {
-                Ok(v) => Some(v.to_string()),
-                Err(_) => None,
-            },
-            None => None,
-        }
-    }
-
     pub fn is_control_message(&self, session: &Session) -> bool {
         let headers = &session.req_header().headers;
 
-        match headers.get("X-Proxy-Authorization").map(|v| v.to_str()) {
+        match headers.get("Authorization").map(|v| v.to_str()) {
             Some(v) => match v {
                 Ok(v) => v == self.proxy_password,
                 Err(_) => false,
@@ -68,6 +46,8 @@ impl MyGateWay {
 pub struct MyCTX {
     host: String,
     is_openai: bool,
+    is_control: bool,
+    new_path: Option<String>,
 }
 
 #[async_trait]
@@ -77,52 +57,15 @@ impl ProxyHttp for MyGateWay {
         return MyCTX {
             host: "server.jaram.net".to_string(),
             is_openai: false,
+            is_control: false,
+            new_path: None,
         };
     }
 
-    async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
-        let token = match self.get_request_token(session) {
-            Some(v) => v,
-            None => {
-                session.respond_error(403).await;
-                println!("No Token");
-                return Ok(true);
-            }
-        };
-
-        if self.validator.validate(&token).await {
-            session.respond_error(403).await;
-            println!("Cannot connect validator server");
-            return Ok(true);
-        }
-
-        let curr_window_requests = {
-            let mut rate_limiter_map = RATE_LIMITER_MAP.lock().unwrap();
-            let rate_limiter = match rate_limiter_map.get(&token) {
-                Some(limiter) => limiter,
-                None => {
-                    let limiter = Rate::new(Duration::from_secs(1));
-                    rate_limiter_map.insert(token.clone(), limiter);
-                    rate_limiter_map.get(&token).unwrap()
-                }
-            };
-
-            rate_limiter.observe(&token, 1)
-        };
-
-        if curr_window_requests > self.limiter.max_req_ps {
-            let mut header = ResponseHeader::build(429, None).unwrap();
-            header
-                .insert_header("X-Rate-Limit-Limit", self.limiter.max_req_ps.to_string())
-                .unwrap();
-            header.insert_header("X-Rate-Limit-Remaining", "0").unwrap();
-            header.insert_header("X-Rate-Limit-Reset", "1").unwrap();
-            session.set_keepalive(None);
-            session.write_response_header(Box::new(header)).await?;
-            return Ok(true);
-        }
-
-        Ok(false)
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        ctx.is_openai = self.gpt.is_gpt(session);
+        ctx.is_control = self.is_control_message(session);
+        Ok(self.limiter.block(session).await)
     }
 
     async fn upstream_peer(
@@ -140,8 +83,20 @@ impl ProxyHttp for MyGateWay {
                 Ok(v) => v,
                 Err(_) => return not_found,
             },
-            None => return not_found,
+            None => {
+                let path = session.req_header().uri.path();
+                let paths: Vec<&str> = path.split("/").collect();
+                match paths[1] {
+                    "" => "haksul-proxy",
+                    _ => {
+                        ctx.new_path = Some("/".to_owned() + &paths[2..paths.len()].join("/"));
+                        paths[1]
+                    }
+                }
+            }
         };
+
+        println!("Peer to {}", endpoint_key);
 
         let peer = self.endpoint.get_peer(endpoint_key, ctx);
         match peer {
@@ -152,7 +107,7 @@ impl ProxyHttp for MyGateWay {
 
     async fn upstream_request_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_request: &mut pingora_http::RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
@@ -160,10 +115,23 @@ impl ProxyHttp for MyGateWay {
             .insert_header("Host", ctx.host.to_owned())
             .unwrap();
 
+        match &ctx.new_path {
+            Some(new_path) => {
+                let uri: Uri = match new_path.parse() {
+                    Ok(uri) => uri,
+                    Err(_) => Uri::from_static("/"),
+                };
+                upstream_request.set_uri(uri);
+            }
+            None => (),
+        }
+
         if ctx.is_openai {
-            upstream_request
-                .insert_header("Authorization", ["Bearer", &self.api_key].join(" "))
-                .unwrap();
+            if self.gpt.validate(session).await {
+                self.gpt.update_token(upstream_request);
+            } else {
+                upstream_request.remove_header("Authorization").unwrap();
+            }
         }
 
         Ok(())
@@ -183,7 +151,6 @@ impl ProxyHttp for MyGateWay {
             .unwrap();
 
         upstream_response.remove_header("alt-svc");
-        upstream_response.remove_header("X-Proxy-Authorization");
         upstream_response.remove_header("X-Jaram-Container");
 
         Ok(())
@@ -199,18 +166,6 @@ fn main() {
     let mut my_server = Server::new(None).unwrap();
     my_server.bootstrap();
 
-    let validator_endpoint = env::var("VALIDATOR");
-    if validator_endpoint.is_err() {
-        println!("Please append VALIDATOR[<ip>:<port>] env variable.");
-        return;
-    }
-
-    let api_key = env::var("OPENAI_API_KEY");
-    if api_key.is_err() {
-        println!("Please append OPENAI_API_KEY env variable.");
-        return;
-    }
-
     let server_endpoint = env::var("PROXY_ENDPOINT");
     if server_endpoint.is_err() {
         println!("Please append PROXY_ENDPOINT env variable.");
@@ -223,17 +178,19 @@ fn main() {
         return;
     }
 
-    let validator = MyValidator {
-        endpoint: validator_endpoint.ok().unwrap(),
-    };
-
     let endpoint = MyEndpoint {};
     endpoint.load_configuration(".entries.json");
 
+    let gpt = match MyGPTProxy::new() {
+        Some(gpt) => gpt,
+        None => {
+            return;
+        }
+    };
+
     let my_gateway = MyGateWay {
         endpoint,
-        validator,
-        api_key: api_key.ok().unwrap(),
+        gpt,
         proxy_password: server_password.ok().unwrap(),
         limiter: MyGateWayLimiter { max_req_ps: 1 },
     };
