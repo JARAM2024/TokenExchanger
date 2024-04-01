@@ -33,7 +33,7 @@ impl MyGateWay {
     pub fn is_control_message(&self, session: &Session) -> bool {
         let headers = &session.req_header().headers;
 
-        match headers.get("Authorization").map(|v| v.to_str()) {
+        match headers.get("Proxy-Authorization").map(|v| v.to_str()) {
             Some(v) => match v {
                 Ok(v) => v == self.proxy_password,
                 Err(_) => false,
