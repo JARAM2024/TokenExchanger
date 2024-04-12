@@ -56,7 +56,7 @@ impl MyEndpoint {
         let unlocked_map = ENDPOINT_MAP.lock().unwrap();
         let endpoint = match unlocked_map.get(key) {
             Some(endpoint) => {
-                ctx.host = endpoint.address.to_owned();
+                ctx.host = endpoint.address.to_owned() + ":" + &endpoint.port.to_string();
                 endpoint.to_owned()
             }
             None => return None,

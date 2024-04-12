@@ -1,10 +1,10 @@
 [
   {
-    "name": "jaram-server",
-    "address": "server.jaram.net",
-    "port": 443,
-    "is_ssl": true,
-    "headers": [["X-Jaram-Server", "True"]]
+    "name": "test",
+    "address": "127.0.0.1",
+    "port": 8000,
+    "is_ssl": false,
+    "headers": []
   },
   {
     "name": "openai-api",

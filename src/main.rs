@@ -96,11 +96,12 @@ impl ProxyHttp for MyGateWay {
             }
         };
 
-        println!("Peer to {}", endpoint_key);
-
         let peer = self.endpoint.get_peer(endpoint_key, ctx);
         match peer {
-            Some(peer) => Ok(Box::new(peer)),
+            Some(peer) => {
+                println!("Peer to {}", peer);
+                Ok(Box::new(peer))
+            }
             None => not_found,
         }
     }
@@ -141,13 +142,17 @@ impl ProxyHttp for MyGateWay {
         &self,
         _session: &mut Session,
         upstream_response: &mut ResponseHeader,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> Result<()>
     where
         Self::CTX: Send + Sync,
     {
         upstream_response
             .insert_header("Server", "MyGateWay")
+            .unwrap();
+
+        upstream_response
+            .insert_header("X-Forwarded-Path", ctx.host.to_owned())
             .unwrap();
 
         upstream_response.remove_header("alt-svc");
