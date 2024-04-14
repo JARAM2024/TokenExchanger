@@ -163,45 +163,43 @@ impl ProxyHttp for MyGateWay {
 }
 
 fn main() {
-    if dotenv().is_err() {
-        println!("Please use .env file for configurations.");
-        return;
-    }
+    dotenv().expect("Please use .env file for configurations.");
 
     let mut my_server = Server::new(None).unwrap();
     my_server.bootstrap();
 
-    let server_endpoint = env::var("PROXY_ENDPOINT");
-    if server_endpoint.is_err() {
-        println!("Please append PROXY_ENDPOINT env variable.");
-        return;
-    }
+    let proxy_endpoint =
+        env::var("PROXY_ENDPOINT").expect("Please append PROXY_ENDPOINT env variable.");
+    let proxy_password =
+        env::var("PROXY_PASSWORD").expect("Please append PROXY_PASSWORD env variable.");
 
-    let server_password = env::var("PROXY_PASSWORD");
-    if server_password.is_err() {
-        println!("Please append PROXY_PASSWORD env variable.");
-        return;
-    }
+    let gpt = MyGPTProxy::new();
 
     let endpoint = MyEndpoint {};
     endpoint.load_configuration(".entries.json");
 
-    let gpt = match MyGPTProxy::new() {
-        Some(gpt) => gpt,
-        None => {
-            return;
-        }
-    };
-
     let my_gateway = MyGateWay {
         endpoint,
+        proxy_password,
         gpt,
-        proxy_password: server_password.ok().unwrap(),
         limiter: MyGateWayLimiter { max_req_ps: 1 },
     };
 
+    let cert_path = format!(
+        "{}/proxy.crt",
+        env::var("PROXY_MANIFEST_DIR").expect("PROXY_MANIFEST_DIR should exist in .env")
+    );
+    let key_path = format!(
+        "{}/proxy.key",
+        env::var("PROXY_MANIFEST_DIR").expect("PROXY_MANIFEST_DIR should exist in .env")
+    );
+
+    let mut tls_settings =
+        pingora_core::listeners::TlsSettings::intermediate(&cert_path, &key_path).unwrap();
+    tls_settings.enable_h2();
+
     let mut my_proxy = pingora_proxy::http_proxy_service(&my_server.configuration, my_gateway);
-    my_proxy.add_tcp(&server_endpoint.ok().unwrap());
+    my_proxy.add_tls_with_settings(&proxy_endpoint, None, tls_settings);
     my_server.add_service(my_proxy);
     my_server.run_forever();
 }

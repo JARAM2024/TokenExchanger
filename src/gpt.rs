@@ -10,25 +10,18 @@ pub struct MyGPTProxy {
 }
 
 impl MyGPTProxy {
-    pub fn new() -> Option<Self> {
-        let api_key = env::var("OPENAI_API_KEY");
-        if api_key.is_err() {
-            println!("Please append OPENAI_API_KEY env variable.");
-            return None;
-        }
+    pub fn new() -> Self {
+        let api_key =
+            env::var("OPENAI_API_KEY").expect("Please append OPENAI_API_KEY env variable.");
+        let validator_endpoint =
+            env::var("VALIDATOR").expect("Please append VALIDATOR[<ip>:<port>] env variable.");
 
-        let validator_endpoint = env::var("VALIDATOR");
-        if validator_endpoint.is_err() {
-            println!("Please append VALIDATOR[<ip>:<port>] env variable.");
-            return None;
-        }
-
-        Some(MyGPTProxy {
-            server_token: api_key.ok().unwrap(),
+        MyGPTProxy {
+            server_token: api_key,
             validator: MyValidator {
-                endpoint: validator_endpoint.ok().unwrap(),
+                endpoint: validator_endpoint,
             },
-        })
+        }
     }
 
     pub fn is_gpt(self: &Self, session: &Session) -> bool {
