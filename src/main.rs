@@ -138,7 +138,7 @@ impl ProxyHttp for MyGateWay {
             if self.gpt.validate(session).await {
                 self.gpt.update_token(upstream_request);
             } else {
-                upstream_request.remove_header("Authorization").unwrap();
+                return Err(Error::new_str("Cannot validate token"));
             }
         }
 
@@ -149,7 +149,7 @@ impl ProxyHttp for MyGateWay {
         &self,
         _session: &mut Session,
         upstream_response: &mut ResponseHeader,
-        ctx: &mut Self::CTX,
+        _ctx: &mut Self::CTX,
     ) -> Result<()>
     where
         Self::CTX: Send + Sync,
