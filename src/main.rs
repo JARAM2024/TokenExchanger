@@ -84,26 +84,28 @@ impl ProxyHttp for MyGateWay {
                 Err(_) => return not_found,
             },
             None => {
-                let mut server_and_path = std::str::from_utf8(session.req_header().raw_path())
-                    .unwrap()
-                    .splitn(3, "/");
+                let mut server_and_path =
+                    std::str::from_utf8(&(session.req_header().raw_path()[1..]))
+                        .unwrap()
+                        .splitn(3, "/");
 
-                server_and_path.next().unwrap();
-
-                let server = match server_and_path.next() {
-                    Some(server) => server,
+                match server_and_path.next() {
+                    Some(server) => {
+                        if server.len() == 0 {
+                            "haksul-proxy"
+                        } else {
+                            ctx.new_uri = match server_and_path.next() {
+                                Some(path) => match ("/".to_string() + path).parse() {
+                                    Ok(uri) => Some(uri),
+                                    Err(_) => None,
+                                },
+                                None => Some(Uri::from_static("/")),
+                            };
+                            server
+                        }
+                    }
                     None => "haksul-proxy",
-                };
-
-                ctx.new_uri = match server_and_path.next() {
-                    Some(path) => match ("/".to_string() + path).parse() {
-                        Ok(uri) => Some(uri),
-                        Err(_) => None,
-                    },
-                    None => Some(Uri::from_static("/")),
-                };
-
-                server
+                }
             }
         };
 
