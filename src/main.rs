@@ -2,9 +2,9 @@ use std::env;
 
 use async_trait::async_trait;
 
-use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_core::Result;
+use pingora_core::{server::Server, Error};
 use pingora_http::ResponseHeader;
 use pingora_proxy::{ProxyHttp, Session};
 
@@ -47,7 +47,7 @@ pub struct MyCTX {
     host: String,
     is_openai: bool,
     is_control: bool,
-    new_path: Option<String>,
+    new_uri: Option<Uri>,
 }
 
 #[async_trait]
@@ -58,7 +58,7 @@ impl ProxyHttp for MyGateWay {
             host: "server.jaram.net".to_string(),
             is_openai: false,
             is_control: false,
-            new_path: None,
+            new_uri: None,
         };
     }
 
@@ -84,15 +84,26 @@ impl ProxyHttp for MyGateWay {
                 Err(_) => return not_found,
             },
             None => {
-                let path = session.req_header().uri.path();
-                let paths: Vec<&str> = path.split("/").collect();
-                match paths[1] {
-                    "" => "haksul-proxy",
-                    _ => {
-                        ctx.new_path = Some("/".to_owned() + &paths[2..paths.len()].join("/"));
-                        paths[1]
-                    }
-                }
+                let mut server_and_path = std::str::from_utf8(session.req_header().raw_path())
+                    .unwrap()
+                    .splitn(3, "/");
+
+                server_and_path.next().unwrap();
+
+                let server = match server_and_path.next() {
+                    Some(server) => server,
+                    None => "haksul-proxy",
+                };
+
+                ctx.new_uri = match server_and_path.next() {
+                    Some(path) => match ("/".to_string() + path).parse() {
+                        Ok(uri) => Some(uri),
+                        Err(_) => None,
+                    },
+                    None => Some(Uri::from_static("/")),
+                };
+
+                server
             }
         };
 
@@ -116,15 +127,11 @@ impl ProxyHttp for MyGateWay {
             .insert_header("Host", ctx.host.to_owned())
             .unwrap();
 
-        match &ctx.new_path {
-            Some(new_path) => {
-                let uri: Uri = match new_path.parse() {
-                    Ok(uri) => uri,
-                    Err(_) => Uri::from_static("/"),
-                };
-                upstream_request.set_uri(uri);
+        match &ctx.new_uri {
+            Some(uri) => upstream_request.set_uri(uri.to_owned()),
+            None => {
+                return Err(Error::new_str("Cannot parse uri"));
             }
-            None => (),
         }
 
         if ctx.is_openai {
