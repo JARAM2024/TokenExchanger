@@ -78,7 +78,7 @@ impl ProxyHttp for MyGateWay {
             "Cannot found such container",
         )));
 
-        let endpoint_key = match headers.get("X-Jaram-Container").map(|v| v.to_str()) {
+        let endpoint_key = match headers.get("Via").map(|v| v.to_str()) {
             Some(v) => match v {
                 Ok(v) => v,
                 Err(_) => return not_found,
@@ -158,12 +158,8 @@ impl ProxyHttp for MyGateWay {
             .insert_header("Server", "MyGateWay")
             .unwrap();
 
-        upstream_response
-            .insert_header("X-Forwarded-Path", ctx.host.to_owned())
-            .unwrap();
-
         upstream_response.remove_header("alt-svc");
-        upstream_response.remove_header("X-Jaram-Container");
+        upstream_response.remove_header("Via");
 
         Ok(())
     }
