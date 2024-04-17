@@ -77,17 +77,21 @@ impl ProxyHttp for MyGateWay {
         let not_found = Err(pingora_core::Error::new(pingora_core::ErrorType::Custom(
             "Cannot found such container",
         )));
-
+        let raw_path = std::str::from_utf8(&(session.req_header().raw_path()[1..])).unwrap();
         let endpoint_key = match headers.get("X-Jaram-Container").map(|v| v.to_str()) {
             Some(v) => match v {
-                Ok(v) => v,
+                Ok(v) => {
+                    ctx.new_uri = match ("/".to_string() + raw_path).parse() {
+                        Ok(uri) => Some(uri),
+                        Err(_) => None,
+                    };
+
+                    v
+                }
                 Err(_) => return not_found,
             },
             None => {
-                let mut server_and_path =
-                    std::str::from_utf8(&(session.req_header().raw_path()[1..]))
-                        .unwrap()
-                        .splitn(3, "/");
+                let mut server_and_path = raw_path.splitn(3, "/");
 
                 match server_and_path.next() {
                     Some(server) => {
@@ -158,10 +162,6 @@ impl ProxyHttp for MyGateWay {
     {
         upstream_response
             .insert_header("Server", "MyGateWay")
-            .unwrap();
-
-        upstream_response
-            .insert_header("X-Forwarded-Path", ctx.host.to_owned())
             .unwrap();
 
         upstream_response.remove_header("alt-svc");
