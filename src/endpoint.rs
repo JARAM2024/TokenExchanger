@@ -15,6 +15,7 @@ pub struct MyEndpointEntry {
     pub address: String,
     pub port: u16,
     pub is_ssl: bool,
+    pub is_outer: bool,
     pub headers: Vec<(String, String)>,
 }
 
@@ -24,6 +25,7 @@ impl MyEndpointEntry {
         address: String,
         port: u16,
         is_ssl: bool,
+        is_outer: bool,
         headers: Vec<(String, String)>,
     ) -> MyEndpointEntry {
         return MyEndpointEntry {
@@ -31,6 +33,7 @@ impl MyEndpointEntry {
             address: address.to_owned(),
             port,
             is_ssl,
+            is_outer,
             headers,
         };
     }
@@ -54,19 +57,17 @@ impl MyEndpoint {
 
     pub fn get_peer(&self, key: &str, ctx: &mut MyCTX) -> Option<HttpPeer> {
         let unlocked_map = ENDPOINT_MAP.lock().unwrap();
-        let endpoint = match unlocked_map.get(key) {
-            Some(endpoint) => {
-                ctx.host = endpoint.address.to_owned() + ":" + &endpoint.port.to_string();
-                endpoint.to_owned()
-            }
-            None => return None,
-        };
+        unlocked_map.get(key).map(|endpoint| {
+            let sni = endpoint.address.to_owned();
+            ctx.host = sni.clone();
+            ctx.is_outer = endpoint.is_outer;
 
-        Some(HttpPeer::new(
-            (endpoint.address.to_owned(), endpoint.port),
-            endpoint.is_ssl,
-            endpoint.address,
-        ))
+            HttpPeer::new(
+                (endpoint.address.to_owned(), endpoint.port),
+                endpoint.is_ssl,
+                sni,
+            )
+        })
     }
 }
 
@@ -82,6 +83,7 @@ lazy_static! {
                 "haksul-proxy".to_owned(),
                 "127.0.0.1".to_owned(),
                 80 as u16,
+                false,
                 false,
                 vec![],
             ),
