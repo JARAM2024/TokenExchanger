@@ -10,8 +10,6 @@ use pingora_proxy::{ProxyHttp, Session};
 
 use dotenv::dotenv;
 
-use http::Uri;
-
 use endpoint::MyEndpoint;
 use gpt::MyGPTProxy;
 use limiter::MyGateWayLimiter;
@@ -47,7 +45,6 @@ pub struct MyCTX {
     host: String,
     is_openai: bool,
     is_control: bool,
-    new_uri: Option<Uri>,
 }
 
 #[async_trait]
@@ -55,65 +52,66 @@ impl ProxyHttp for MyGateWay {
     type CTX = MyCTX;
     fn new_ctx(&self) -> Self::CTX {
         return MyCTX {
-            host: "server.jaram.net".to_string(),
+            host: "jaram.net".to_string(),
             is_openai: false,
             is_control: false,
-            new_uri: None,
         };
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        let headers = &session.req_header().headers;
         ctx.is_openai = self.gpt.is_gpt(session);
         ctx.is_control = self.is_control_message(session);
+
+        let endpoint_host = match headers.get(http::header::HOST).map(|v| v.to_str()) {
+            Some(v) => match v {
+                Ok(v) => {
+                    let host_split: Vec<&str> = v.split(".").collect();
+                    let host_len = host_split.len();
+                    if host_split.len() < 2
+                        || (host_split[host_len - 2] != "jaram"
+                            && host_split[host_len - 1] != "net")
+                    {
+                        None
+                    } else {
+                        Some(host_split[0..host_len - 2].join("-"))
+                    }
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
+
+        let endpoint_key = match headers.get("X-Jaram-Container").map(|v| v.to_str()) {
+            Some(v) => match v {
+                Ok(v) => Some(v),
+                Err(_) => None,
+            },
+            None => None,
+        };
+
+        ctx.host = match endpoint_host {
+            Some(host) => host,
+            None => match endpoint_key {
+                Some(key) => key,
+                None => "haksul-proxy",
+            }
+            .to_string(),
+        };
+
         Ok(self.limiter.block(session).await)
     }
 
     async fn upstream_peer(
         &self,
-        session: &mut Session,
+        _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let headers = &session.req_header().headers;
         let not_found = Err(pingora_core::Error::new(pingora_core::ErrorType::Custom(
             "Cannot found such container",
         )));
-        let raw_path = std::str::from_utf8(&(session.req_header().raw_path()[1..])).unwrap();
-        let endpoint_key = match headers.get("X-Jaram-Container").map(|v| v.to_str()) {
-            Some(v) => match v {
-                Ok(v) => {
-                    ctx.new_uri = match ("/".to_string() + raw_path).parse() {
-                        Ok(uri) => Some(uri),
-                        Err(_) => None,
-                    };
 
-                    v
-                }
-                Err(_) => return not_found,
-            },
-            None => {
-                let mut server_and_path = raw_path.splitn(3, "/");
-
-                match server_and_path.next() {
-                    Some(server) => {
-                        if server.len() == 0 {
-                            "haksul-proxy"
-                        } else {
-                            ctx.new_uri = match server_and_path.next() {
-                                Some(path) => match ("/".to_string() + path).parse() {
-                                    Ok(uri) => Some(uri),
-                                    Err(_) => None,
-                                },
-                                None => Some(Uri::from_static("/")),
-                            };
-                            server
-                        }
-                    }
-                    None => "haksul-proxy",
-                }
-            }
-        };
-
-        let peer = self.endpoint.get_peer(endpoint_key, ctx);
+        let peer = self.endpoint.get_peer(&ctx.host.to_owned(), ctx);
         match peer {
             Some(peer) => {
                 println!("Peer to {}", peer);
@@ -129,17 +127,6 @@ impl ProxyHttp for MyGateWay {
         upstream_request: &mut pingora_http::RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        upstream_request
-            .insert_header("Host", ctx.host.to_owned())
-            .unwrap();
-
-        match &ctx.new_uri {
-            Some(uri) => upstream_request.set_uri(uri.to_owned()),
-            None => {
-                return Err(Error::new_str("Cannot parse uri"));
-            }
-        }
-
         if ctx.is_openai {
             if self.gpt.validate(session).await {
                 self.gpt.update_token(upstream_request);

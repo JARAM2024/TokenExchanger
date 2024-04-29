@@ -65,7 +65,7 @@ impl MyEndpoint {
         Some(HttpPeer::new(
             (endpoint.address.to_owned(), endpoint.port),
             endpoint.is_ssl,
-            endpoint.address,
+            ctx.host.to_owned(),
         ))
     }
 }
