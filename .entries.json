@@ -2,7 +2,7 @@
   {
     "name": "test",
     "address": "127.0.0.1",
-    "port": 4123,
+    "port": 8000,
     "is_ssl": false,
     "headers": []
   },
@@ -11,6 +11,13 @@
     "address": "api.openai.com",
     "port": 443,
     "is_ssl": true,
-    "headers": [["X-Openai-API", "True"]]
+    "headers": []
+  },
+  {
+    "name": "admin",
+    "address": "server.jaram.net",
+    "port": 8006,
+    "is_ssl": true,
+    "headers": []
   }
 ]
