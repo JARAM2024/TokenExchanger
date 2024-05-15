@@ -1,204 +1,77 @@
+#[global_allocator]
+static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 use std::env;
-
-use async_trait::async_trait;
-
-use pingora_core::upstreams::peer::HttpPeer;
-use pingora_core::Result;
-use pingora_core::{server::Server, Error};
-use pingora_http::ResponseHeader;
-use pingora_proxy::{ProxyHttp, Session};
 
 use dotenv::dotenv;
 
-use endpoint::MyEndpoint;
-use gpt::MyGPTProxy;
-use limiter::MyGateWayLimiter;
-use validator::MyValidator;
+use pingora::server::configuration::Opt;
+use pingora::server::{Server, ShutdownWatch};
+use pingora::services::background::{background_service, BackgroundService};
+use pingora::services::{listening::Service as ListeningService, Service};
 
-mod endpoint;
-mod gpt;
-mod limiter;
-mod validator;
+use async_trait::async_trait;
+use structopt::StructOpt;
+use tokio::time::interval;
 
-pub struct MyGateWay {
-    endpoint: MyEndpoint,
-    gpt: MyGPTProxy,
-    proxy_password: String,
-    limiter: MyGateWayLimiter,
-}
+use std::time::Duration;
 
-impl MyGateWay {
-    pub fn get_host(&self, session: &Session) -> String {
-        if let Some(host) = session.get_header(http::header::HOST) {
-            if let Ok(host_str) = host.to_str() {
-                return host_str.to_string();
+mod app;
+mod service;
+
+pub struct HaksulBackgroundService;
+#[async_trait]
+impl BackgroundService for HaksulBackgroundService {
+    async fn start(&self, mut shutdown: ShutdownWatch) {
+        let mut period = interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    // shutdown
+                    break;
+                }
+                _ = period.tick() => {
+                    // do some work
+                    // ...
+                }
             }
         }
-
-        if let Some(host) = session.req_header().uri.host() {
-            return host.to_string();
-        }
-
-        "".to_string()
-    }
-
-    pub fn is_control_message(&self, session: &Session) -> bool {
-        let headers = &session.req_header().headers;
-
-        match headers
-            .get(http::header::PROXY_AUTHORIZATION)
-            .map(|v| v.to_str())
-        {
-            Some(v) => match v {
-                Ok(v) => v == self.proxy_password,
-                Err(_) => false,
-            },
-            None => false,
-        }
     }
 }
 
-pub struct MyCTX {
-    host: String,
-    is_openai: bool,
-    is_control: bool,
-    sni: Option<String>,
+use pingora::tls::pkey::{PKey, Private};
+use pingora::tls::x509::X509;
+struct DynamicCert {
+    cert: X509,
+    key: PKey<Private>,
+}
+
+impl DynamicCert {
+    fn new(cert: &str, key: &str) -> Box<Self> {
+        let cert_bytes = std::fs::read(cert).unwrap();
+        let cert = X509::from_pem(&cert_bytes).unwrap();
+
+        let key_bytes = std::fs::read(key).unwrap();
+        let key = PKey::private_key_from_pem(&key_bytes).unwrap();
+        Box::new(DynamicCert { cert, key })
+    }
 }
 
 #[async_trait]
-impl ProxyHttp for MyGateWay {
-    type CTX = MyCTX;
-    fn new_ctx(&self) -> Self::CTX {
-        return MyCTX {
-            host: "jaram.net".to_string(),
-            is_openai: false,
-            is_control: false,
-            sni: None,
-        };
-    }
-
-    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        ctx.is_openai = self.gpt.is_gpt(session);
-        ctx.is_control = self.is_control_message(session);
-
-        let endpoint_host = {
-            let host = self.get_host(session);
-            let host_split: Vec<&str> = host.split(".").collect();
-            let host_len = host_split.len();
-            if host_split.len() < 2
-                || (host_split[host_len - 2] != "jaram" && host_split[host_len - 1] != "net")
-            {
-                None
-            } else {
-                Some(host_split[0..host_len - 2].join("-"))
-            }
-        };
-
-        let endpoint_key = session
-            .get_header("X-Jaram-Container")
-            .map(|v| v.to_str())
-            .map(|v| v.ok().unwrap());
-
-        ctx.host = match endpoint_key {
-            Some(key) => key.to_string(),
-            None => endpoint_host.unwrap_or("haksul-proxy".to_string()),
-        };
-
-        Ok(self.limiter.block(session).await)
-    }
-
-    async fn upstream_peer(
-        &self,
-        _session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<Box<HttpPeer>> {
-        let not_found = Err(pingora_core::Error::new(pingora_core::ErrorType::Custom(
-            "Cannot found such container",
-        )));
-
-        match self.endpoint.get_peer(&ctx.host.to_owned(), ctx) {
-            Some(peer) => {
-                println!("Peer to {}", peer);
-                Ok(Box::new(peer))
-            }
-            None => not_found,
-        }
-    }
-
-    async fn upstream_request_filter(
-        &self,
-        session: &mut Session,
-        upstream_request: &mut pingora_http::RequestHeader,
-        ctx: &mut Self::CTX,
-    ) -> Result<()> {
-        if ctx.is_openai {
-            if self.gpt.validate(session).await {
-                self.gpt.update_token(upstream_request);
-            } else {
-                return Err(Error::new_str("Cannot validate token"));
-            }
-        }
-
-        ctx.sni.as_ref().map(|sni| {
-            upstream_request
-                .insert_header(
-                    http::header::HOST,
-                    sni.to_owned(),
-                )
-                .unwrap();
-        });
-
-        upstream_request.remove_header(&http::header::PROXY_AUTHORIZATION);
-        upstream_request.remove_header("X-Jaram-Container");
-
-        Ok(())
-    }
-
-    async fn response_filter(
-        &self,
-        _session: &mut Session,
-        upstream_response: &mut ResponseHeader,
-        ctx: &mut Self::CTX,
-    ) -> Result<()>
-    where
-        Self::CTX: Send + Sync,
-    {
-        upstream_response
-            .insert_header("Server", "MyGateWay")
-            .unwrap();
-
-        upstream_response
-            .insert_header(http::header::HOST, ctx.host.to_owned())
-            .unwrap();
-
-        upstream_response.remove_header("alt-svc");
-
-        Ok(())
+impl pingora::listeners::TlsAccept for DynamicCert {
+    async fn certificate_callback(&self, ssl: &mut pingora::tls::ssl::SslRef) {
+        use pingora::tls::ext;
+        ext::ssl_use_certificate(ssl, &self.cert).unwrap();
+        ext::ssl_use_private_key(ssl, &self.key).unwrap();
     }
 }
 
 fn main() {
     dotenv().expect("Please use .env file for configurations.");
 
-    let mut my_server = Server::new(None).unwrap();
+    let opt = Some(Opt::from_args());
+    let mut my_server = Server::new(opt).unwrap();
     my_server.bootstrap();
-
-    let proxy_endpoint =
-        env::var("PROXY_ENDPOINT").expect("Please append PROXY_ENDPOINT env variable.");
-    let proxy_password =
-        env::var("PROXY_PASSWORD").expect("Please append PROXY_PASSWORD env variable.");
-
-    let gpt = MyGPTProxy::new();
-
-    let endpoint = MyEndpoint {};
-    endpoint.load_configuration(".entries.json");
-
-    let my_gateway = MyGateWay {
-        endpoint,
-        proxy_password,
-        gpt,
-        limiter: MyGateWayLimiter { max_req_ps: 1 },
-    };
 
     let cert_path = format!(
         "{}/proxy.crt",
@@ -209,12 +82,30 @@ fn main() {
         env::var("PROXY_MANIFEST_DIR").expect("PROXY_MANIFEST_DIR should exist in .env")
     );
 
-    let mut tls_settings =
-        pingora_core::listeners::TlsSettings::intermediate(&cert_path, &key_path).unwrap();
+    let dynamic_cert = DynamicCert::new(&cert_path, &key_path);
+    let mut tls_settings = pingora::listeners::TlsSettings::with_callbacks(dynamic_cert).unwrap();
+    tls_settings
+        .set_max_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_2))
+        .unwrap();
     tls_settings.enable_h2();
 
-    let mut my_proxy = pingora_proxy::http_proxy_service(&my_server.configuration, my_gateway);
-    my_proxy.add_tls_with_settings(&proxy_endpoint, None, tls_settings);
-    my_server.add_service(my_proxy);
+    let proxy_service = service::proxy::proxy_service(&my_server.configuration);
+    let proxy_ssl_service =
+        service::proxy::proxy_service_tls(&my_server.configuration, tls_settings);
+
+    let background_service = background_service("example", HaksulBackgroundService {});
+
+    let prometheus_endpoint =
+        env::var("PROMETHEUS_ENDPOINT").expect("PROMETHEUS_ENDPOINT should exist in .env");
+    let mut prometheus_service_http = ListeningService::prometheus_http_service();
+    prometheus_service_http.add_tcp(&prometheus_endpoint);
+
+    let services: Vec<Box<dyn Service>> = vec![
+        Box::new(proxy_service),
+        Box::new(proxy_ssl_service),
+        Box::new(prometheus_service_http),
+        Box::new(background_service),
+    ];
+    my_server.add_services(services);
     my_server.run_forever();
 }
