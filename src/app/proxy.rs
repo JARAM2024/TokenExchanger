@@ -11,8 +11,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-use lazy_static::lazy_static;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -45,9 +43,35 @@ impl EndpointEntry {
     }
 }
 
-pub struct Endpoint {}
+pub struct Endpoint {
+    endpoint_map: Arc<Mutex<HashMap<&'static str, EndpointEntry>>>,
+}
 
 impl Endpoint {
+    pub fn new() -> Endpoint {
+        Endpoint {
+            endpoint_map: {
+                let map = Arc::new(Mutex::new(HashMap::new()));
+
+                let mut unlocked_map = map.lock().unwrap();
+
+                unlocked_map.insert(
+                    "haksul-proxy",
+                    EndpointEntry::new(
+                        "haksul-proxy".to_owned(),
+                        "127.0.0.1".to_owned(),
+                        80 as u16,
+                        false,
+                        false,
+                        vec![],
+                    ),
+                );
+
+                map.to_owned()
+            },
+        }
+    }
+
     pub fn load_configuration(&self, file_path: &str) {
         let content = fs::read_to_string(file_path);
         let entries: Vec<EndpointEntry> =
@@ -59,13 +83,13 @@ impl Endpoint {
                 Err(_) => return,
             };
         for entry in entries.iter() {
-            let mut unlocked_map = ENDPOINT_MAP.lock().unwrap();
+            let mut unlocked_map = self.endpoint_map.lock().unwrap();
             unlocked_map.insert(entry.name.clone().leak(), entry.clone());
         }
     }
 
     pub fn get_peer(&self, key: &str, ctx: &mut ProxyCTX) -> Option<HttpPeer> {
-        let unlocked_map = ENDPOINT_MAP.lock().unwrap();
+        let unlocked_map = self.endpoint_map.lock().unwrap();
         unlocked_map.get(key).map(|endpoint| {
             let sni = endpoint.address.to_owned();
             if endpoint.is_outer {
@@ -79,28 +103,6 @@ impl Endpoint {
             )
         })
     }
-}
-
-lazy_static! {
-    static ref ENDPOINT_MAP: Arc<Mutex<HashMap<&'static str, EndpointEntry>>> = {
-        let map = Arc::new(Mutex::new(HashMap::new()));
-
-        let mut unlocked_map = map.lock().unwrap();
-
-        unlocked_map.insert(
-            "haksul-proxy",
-            EndpointEntry::new(
-                "haksul-proxy".to_owned(),
-                "127.0.0.1".to_owned(),
-                80 as u16,
-                false,
-                false,
-                vec![],
-            ),
-        );
-
-        return map.to_owned();
-    };
 }
 
 pub struct ProxyApp {

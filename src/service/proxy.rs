@@ -8,7 +8,7 @@ use pingora_proxy::HttpProxy;
 use std::sync::Arc;
 
 pub fn proxy_service(server_conf: &Arc<ServerConf>) -> Service<HttpProxy<ProxyApp>> {
-    let endpoint = Endpoint {};
+    let endpoint = Endpoint::new();
     endpoint.load_configuration("http_entries.json");
 
     let addr = std::env::var("HTTP_PROXY_ENDPOINT")
@@ -30,7 +30,7 @@ pub fn proxy_service_tls(
     server_conf: &Arc<ServerConf>,
     tls_settings: TlsSettings,
 ) -> Service<HttpProxy<ProxyApp>> {
-    let endpoint = Endpoint {};
+    let endpoint = Endpoint::new();
     endpoint.load_configuration("https_entries.json");
 
     let addr = std::env::var("HTTPS_PROXY_ENDPOINT")
